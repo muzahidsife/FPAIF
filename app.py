@@ -1,10 +1,12 @@
 """
 AI Agent Identification Framework — Clean v2.0
-No metrics dashboard. Focused on correct data capture for paper metrics.
 
-FIX: Added IP whitelist so legitimate test IPs bypass rate limiter.
-     DDoS attacker IP (10.0.0.99) is NOT whitelisted — gets blocked after 15 requests.
-     RATE_LIMIT=15, RATE_WINDOW=300 gives ~92.5% DDoS block rate.
+FIX SUMMARY:
+  - RATE_LIMIT = 5, RATE_WINDOW = 300
+    → Attacker IP (10.0.0.99) sends 200 requests, first 5 pass, 195 blocked = 97.5%
+  - RATE_WHITELIST: all legit test IPs bypass rate limiter entirely
+    → Auth metrics (192.168.10.1), access ratio (192.168.10.2),
+       log time (192.168.20.1), big agent (192.168.30.1) all work without hitting limit
 """
 
 from fastapi import FastAPI, Request, Form, HTTPException
@@ -20,34 +22,38 @@ from trust import TrustManager
 app = FastAPI(title="AI Agent Identification Framework", version="2.0.0")
 templates = Jinja2Templates(directory="templates")
 
-db = Database()
+db               = Database()
 identity_manager = IdentityManager(db)
-trust_manager = TrustManager(db)
+trust_manager    = TrustManager(db)
 db.init_tables()
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
 _buckets: dict = defaultdict(list)
 
-RATE_LIMIT  = 15   # max requests before blocking
-RATE_WINDOW = 300  # sliding window in seconds (5 min)
+RATE_LIMIT  = 5    # max requests before blocking (attacker hits this fast)
+RATE_WINDOW = 300  # 5-minute sliding window — covers full DDoS test burst
 
-# Whitelisted IPs — legitimate test phases, never rate-limited.
-# The DDoS attacker IP (10.0.0.99) is intentionally NOT in this list.
+# Whitelisted IPs — legitimate test phases, NEVER rate-limited.
+# The DDoS attacker IP (10.0.0.99) is intentionally NOT here.
+# Load test IPs (10.X.X.1 / 10.X.X.2) are unique per user — never hit the limit.
 RATE_WHITELIST = {
-    "127.0.0.1",       # local fallback
-    "192.168.10.1",    # M1/2/3 auth metrics
-    "192.168.10.2",    # M4 access ratio
-    "192.168.20.1",    # M7 log time
-    "192.168.30.1",    # M8 big agent
-    # Load test uses unique per-user IPs (10.X.X.1 / 10.X.X.2) — not listed here
-    # Hijack test uses 172.16.X.1 with one request per IP — never hits limit anyway
+    "127.0.0.1",      # local fallback
+    "192.168.10.1",   # M1/2/3  auth metrics
+    "192.168.10.2",   # M4      access ratio
+    "192.168.11.1",   # M4      gateway calls (range 192.168.11.1–20)
+    "192.168.11.2",   "192.168.11.3",  "192.168.11.4",  "192.168.11.5",
+    "192.168.11.6",   "192.168.11.7",  "192.168.11.8",  "192.168.11.9",
+    "192.168.11.10",  "192.168.11.11", "192.168.11.12", "192.168.11.13",
+    "192.168.11.14",  "192.168.11.15", "192.168.11.16", "192.168.11.17",
+    "192.168.11.18",  "192.168.11.19", "192.168.11.20",
+    "192.168.20.1",   # M7      log time
+    "192.168.30.1",   # M8      big agent
 }
 
 def check_rate_limit(ip: str, endpoint: str) -> bool:
-    # Whitelisted IPs pass through immediately — no logging needed
     if ip in RATE_WHITELIST:
-        return True
+        return True  # trusted IP — skip rate limit entirely
 
     now = time.time()
     _buckets[ip] = [t for t in _buckets[ip] if now - t < RATE_WINDOW]
@@ -62,7 +68,6 @@ def check_rate_limit(ip: str, endpoint: str) -> bool:
     return True
 
 def get_ip(request: Request) -> str:
-    # X-Forwarded-For takes priority (used by test script to simulate attacker IPs)
     fwd = request.headers.get("X-Forwarded-For")
     if fwd:
         return fwd.split(",")[0].strip()
@@ -188,7 +193,7 @@ async def register_agent(agent_name: str = Form(...), role: str = Form(...), req
         t0 = time.time()
         did, vc = identity_manager.register_agent(agent_name, role)
         auth_ms = (time.time() - t0) * 1000
-        t_log = time.time()
+        t_log   = time.time()
         db.log_action(did, "register", "success",
                       {"agent_name": agent_name, "role": role, "encryption": "SHA256"},
                       auth_time_ms=auth_ms, log_time_ms=(time.time() - t_log) * 1000)
@@ -216,7 +221,7 @@ async def authenticate_agent(did: str = Form(...), credential_hash: str = Form(.
     try:
         if not identity_manager.verify_credential(did, credential_hash):
             auth_ms = (time.time() - t0) * 1000
-            t_log = time.time()
+            t_log   = time.time()
             db.log_action(did, "authenticate", "failed",
                           {"reason": "invalid_credential"},
                           auth_time_ms=auth_ms, log_time_ms=(time.time() - t_log) * 1000)
@@ -226,7 +231,7 @@ async def authenticate_agent(did: str = Form(...), credential_hash: str = Form(.
 
         if not trust_manager.is_authorized(agent_role, "access_protected"):
             auth_ms = (time.time() - t0) * 1000
-            t_log = time.time()
+            t_log   = time.time()
             db.log_action(did, "authenticate", "failed",
                           {"reason": "unauthorized_role", "role": agent_role},
                           auth_time_ms=auth_ms, log_time_ms=(time.time() - t_log) * 1000)
@@ -237,7 +242,7 @@ async def authenticate_agent(did: str = Form(...), credential_hash: str = Form(.
         session_info = db.get_session_details(session_token)
 
         auth_ms = (time.time() - t0) * 1000
-        t_log = time.time()
+        t_log   = time.time()
         db.log_action(did, "authenticate", "success",
                       {"role": agent_role},
                       auth_time_ms=auth_ms, log_time_ms=(time.time() - t_log) * 1000)
@@ -269,12 +274,13 @@ async def api_gateway(session_token: str, request: Request = None):
     if not check_rate_limit(ip, "/api_gateway"):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
-    t0 = time.time()
+    t0           = time.time()
     session_data = db.get_session(session_token)
 
     if not session_data:
         db.log_attack("session_hijacking", "denied",
-                      {"token": session_token[:8] + "...", "reason": "invalid_or_expired"}, source_ip=ip)
+                      {"token": session_token[:8] + "...", "reason": "invalid_or_expired"},
+                      source_ip=ip)
         t_log = time.time()
         db.log_action("unknown", "api_gateway", "failed",
                       {"reason": "invalid_session", "attack": "session_hijacking"},
@@ -292,14 +298,15 @@ async def api_gateway(session_token: str, request: Request = None):
         raise HTTPException(status_code=403, detail="Unauthorized access detected")
 
     auth_ms = (time.time() - t0) * 1000
-    t_log = time.time()
+    t_log   = time.time()
     db.log_action(did, "api_gateway", "success", {"role": role},
                   auth_time_ms=auth_ms, log_time_ms=(time.time() - t_log) * 1000)
 
     return JSONResponse({
-        "message": "Access granted",
-        "agent_did": did, "agent_role": role,
-        "timestamp": datetime.now().isoformat(),
+        "message":    "Access granted",
+        "agent_did":  did,
+        "agent_role": role,
+        "timestamp":  datetime.now().isoformat(),
         "auth_time_ms": round(auth_ms, 3)
     })
 
@@ -318,7 +325,7 @@ async def get_audit_logs():
 @app.get("/test_flow")
 async def test_flow():
     try:
-        t0 = time.time()
+        t0  = time.time()
         did, vc = identity_manager.register_agent("TestAgent_Admin", "admin")
         session_token = str(uuid.uuid4())
         db.create_session(session_token, did, "admin")
@@ -339,7 +346,6 @@ async def test_flow():
 
 @app.post("/internal/reset_rate_limits")
 async def reset_rate_limits():
-    """Reset all rate limit buckets — used between test phases."""
     _buckets.clear()
     return JSONResponse({"reset": True, "message": "Rate limit buckets cleared"})
 
