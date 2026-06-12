@@ -25,7 +25,7 @@ db.init_tables()
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 _buckets: dict = defaultdict(list)
 RATE_LIMIT  = 10   # max requests
-RATE_WINDOW = 10   # per seconds
+RATE_WINDOW = 300   # per seconds
 
 def check_rate_limit(ip: str, endpoint: str) -> bool:
     now = time.time()
